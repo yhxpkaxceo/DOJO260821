@@ -1,8 +1,8 @@
 // ─────────────────────────────────────────────────────────
-// これは「業務アプリの画面」です。宣伝ページ（LP）ではありません。
+// 学生プロジェクト台帳
 //
-// /build を実行すると、docs/03_spec.md にそって
-// この構造を保ったまま、あなたの題材のツールに作り替えられます。
+// 見聞きした学生団体を登録し、接触の段階を進めていく画面です。
+// 宣伝ページ（LP）ではありません。
 //
 // 画面の骨格（この形は崩さない）:
 //   左メニュー（.side）＋ 上部バー（.topbar）＋ 本体（.content）
@@ -13,186 +13,132 @@
 import { useEffect, useMemo, useState } from "react";
 
 // ═══════════════════════════════════════════════════════════
-//  画面の型 ── ここだけ選び直せば、見た目と並び方が変わります
-//  /build が docs/03_spec.md の「0. 画面の型」を見てここを設定します。
-//  ⚠ 新しいCSSは書かない。下の選択肢から選ぶこと。
+//  画面の型 ── docs/03_spec.md「0. 画面の型」で決めた値
+//  ⚠ 新しいCSSは書かない。app/globals.css の選択肢から選ぶこと。
 // ═══════════════════════════════════════════════════════════
 
-/** 色み。業種の空気に合わせる
- *  "pine"   教育・サービス・その他（初期値）
- *  "indigo" 士業・不動産・BtoB
- *  "clay"   建設・工務店・現場仕事
- *  "sea"    医療・介護・公共
- *  "wine"   飲食・小売・美容
- */
+/** 色み。学生起業支援＝教育・サービスなので pine */
 const TONE = "pine";
 
-/** 密度。1日に見る件数で決める
- *  "compact" 1日20件以上（多くの行を1画面に）
- *  "normal"  ふつう（初期値）
- *  "roomy"   1日5件以下で、1件が重い（ゆったり）
- */
-const DENSITY = "normal";
+/** 密度。月10団体・1件が面談という重い単位なので roomy */
+const DENSITY = "roomy";
 
-/** 画面の型。3行目「何が一覧で見られると助かるか」で決める
- *  "queue" 待たせているものを、古い順に片づける（問い合わせ・依頼・返信）
- *  "stage" いくつかの段階を順に進んでいく（査定→撮影→値付け→出品）
- *  "due"   期限がある（締切・訪問予定・提出物・更新期限）
- */
-const LAYOUT: "queue" | "stage" | "due" = "queue";
+/** 画面の型。「どの段階で止まっているか」が知りたいので stage */
+const LAYOUT: "queue" | "stage" | "due" = "stage";
 
-/** 数え方。件 / 名 / 棟 / 台 / 点 / 本 など、その仕事の言葉で */
-const UNIT = "件";
+/** 数え方。数えているのは「件」ではなく話す相手＝団体 */
+const UNIT = "団体";
 
-/** 区分の選択肢。LAYOUT が "stage" のときは、これが「段階」になる（順番どおりに並ぶ） */
-const CATEGORIES = ["LINE", "電話", "メール", "紹介"];
+/** 段階。左から右へ、実際の進み方の順に並べる */
+const CATEGORIES = ["見つけた", "連絡した", "面談した", "伴走中"];
+
+/** 「動きなし」と見なす日数。月10団体のペースに合わせて14日 */
+const STALE_DAYS = 14;
 
 // ═══════════════════════════════════════════════════════════
 
-/** 1件のデータ。/build でこの項目名を題材に合わせて変える */
-type Record = {
+/** 1団体分のデータ（5項目） */
+type Project = {
   id: string;
-  name: string;      // 主たる名前（顧客名・品名など）
-  category: string;  // 区分／段階／種別
-  note: string;      // メモ
-  date: string;      // YYYY-MM-DD（queue=受けた日 / stage=受け入れた日 / due=期限）
-  done: boolean;     // 片づいたか
+  team: string;     // 団体名
+  stage: string;    // いまの段階
+  note: string;     // メモ
+  movedOn: string;  // 最後に動いた日（YYYY-MM-DD）
+  settled: boolean; // 決着したか（事業化 or 見送りで、もう追わない）
 };
 
 type View = "list" | "new" | "settings";
 type Filter = "open" | "done" | "all";
 
-const KEY = "starter-records";
-const NAME_KEY = "starter-appname";
+const KEY = "student-projects-data";
+const NAME_KEY = "student-projects-appname";
 
-/** 画面の型ごとの言葉。ここを直せば画面じゅうの文言が揃って変わる */
+/** 画面じゅうの文言。ここを直せば言葉が揃って変わる */
 const TEXT = {
-  queue: {
-    sub: "未対応のものが、待たせている順に並びます",
-    open: "未対応", done: "対応済",
-    toTo: "対応済みにする", toBack: "未対応に戻す",
-    dateLabel: "受けた日", catLabel: "区分",
-    stat2: "3日以上 放置",
-    headOpen: "未対応（待たせている順）",
-  },
-  stage: {
-    sub: "どの段階で止まっているかが分かります",
-    open: "進行中", done: "完了",
-    toTo: "完了にする", toBack: "進行中に戻す",
-    dateLabel: "受け入れた日", catLabel: "いまの段階",
-    stat2: "7日以上 動きなし",
-    headOpen: "進行中",
-  },
-  due: {
-    sub: "期限が近い順に並びます",
-    open: "未完了", done: "完了",
-    toTo: "完了にする", toBack: "未完了に戻す",
-    dateLabel: "期限", catLabel: "種別",
-    stat2: "期限切れ",
-    headOpen: "未完了（期限が近い順）",
-  },
-}[LAYOUT];
+  sub: "どの段階で止まっているかが分かります",
+  open: "進行中",
+  done: "決着",
+  toTo: "決着にする",
+  toBack: "進行中に戻す",
+  dateLabel: "最後に動いた日",
+  catLabel: "いまの段階",
+  stat2: `${STALE_DAYS}日以上 動きなし`,
+  headOpen: "進行中",
+};
 
-/** n日前の日付。マイナスを渡すとn日後（"due" の見本データで使う） */
+/** n日前の日付 */
 const ago = (n: number) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
 const today = () => ago(0);
 
-/** 今日との差。0=今日、-3=3日過ぎている、+2=あと2日 */
+/** 今日との差。0=今日、-3=3日過ぎている */
 const diff = (d: string) =>
   Math.round(
     (new Date(d + "T00:00:00").getTime() - new Date(today() + "T00:00:00").getTime()) / 86400000
   );
 
-/** 何日待たせているか（"queue" / "stage" 用） */
+/** 最後に動いた日から何日経ったか */
 const waiting = (d: string) => Math.max(0, -diff(d));
 
 /**
- * 見本データ。/build でこの中身を題材に合わせて入れ替える。
- * ⚠ 実在の人名・会社名・連絡先は使わない。件数は12〜15件（少ないと画面が寂しく見える）
+ * 見本データ。すべて架空の団体名です。
+ * 実在の人名・団体名・連絡先は使っていません。
  */
-const SAMPLE: Record[] = [
-  { id: "s01", name: "佐藤さん（中2）", category: "LINE",   note: "数学と英語、週2希望。木曜以外",        date: ago(0),  done: false },
-  { id: "s02", name: "田村さん（小5）", category: "電話",   note: "折り返し希望 18時以降",               date: ago(1),  done: false },
-  { id: "s03", name: "鈴木さん（高1）", category: "紹介",   note: "在籍生のご家族から。物理を見てほしい",  date: ago(1),  done: false },
-  { id: "s04", name: "中村さん（中3）", category: "メール", note: "受験相談。志望校はまだ決めていない",   date: ago(2),  done: false },
-  { id: "s05", name: "渡辺さん（中2）", category: "紹介",   note: "平日夕方のみ。部活が19時まで",         date: ago(3),  done: false },
-  { id: "s06", name: "小林さん（中1）", category: "LINE",   note: "体験授業の日程を調整中",              date: ago(4),  done: false },
-  { id: "s07", name: "松本さん（小4）", category: "メール", note: "兄弟割引について聞かれている",         date: ago(5),  done: false },
-  { id: "s08", name: "山口さん（小6）", category: "電話",   note: "料金表を送ってほしいとのこと",         date: ago(6),  done: false },
-  { id: "s09", name: "吉田さん（高2）", category: "LINE",   note: "夏期講習の残席を確認したい",           date: ago(9),  done: false },
-  { id: "s10", name: "井上さん（中3）", category: "電話",   note: "面談日程を確定。来週火曜18時",         date: ago(12), done: true },
-  { id: "s11", name: "清水さん（高3）", category: "LINE",   note: "資料送付済み。返事待ち",              date: ago(14), done: true },
-  { id: "s12", name: "森さん（小3）",   category: "紹介",   note: "体験のあと入会。4月から週1",          date: ago(16), done: true },
-  { id: "s13", name: "大野さん（中1）", category: "メール", note: "他塾と比較検討中とのこと",            date: ago(18), done: true },
-  { id: "s14", name: "岡田さん（高1）", category: "LINE",   note: "今回は見送りとご連絡あり",            date: ago(21), done: true },
+const SAMPLE: Project[] = [
+  { id: "s01", team: "なぎさ大 高校生向け進路相談チーム", stage: "見つけた", note: "学園祭で名前だけ聞いた。代表未確認",                movedOn: ago(21), settled: false },
+  { id: "s02", team: "こもれび大 学内古着リユース",       stage: "見つけた", note: "サークル発。月1回の交換会を回している",          movedOn: ago(17), settled: false },
+  { id: "s03", team: "つばさ大 手話通訳の割り当て研究",   stage: "見つけた", note: "研究室発。事業化の意思があるかは未確認",          movedOn: ago(5),  settled: false },
+  { id: "s04", team: "やまびこ大 農家向け出荷管理",       stage: "連絡した", note: "代表にメッセージ送付。返事待ち",                  movedOn: ago(16), settled: false },
+  { id: "s05", team: "せせらぎ大 地域交通アプリチーム",   stage: "連絡した", note: "過疎地の乗合バス予約。ビジコンで賞。返事待ち",    movedOn: ago(9),  settled: false },
+  { id: "s06", team: "かえで大 学食サブスク検討チーム",   stage: "連絡した", note: "生協の担当者と話したいとのこと。日程調整中",      movedOn: ago(3),  settled: false },
+  { id: "s07", team: "みなと大 フードロス削減プロジェクト", stage: "面談した", note: "学食の廃棄量を可視化。代表は3年生。次は指導教員に会う", movedOn: ago(24), settled: false },
+  { id: "s08", team: "ほしのき大 生協の混雑可視化",       stage: "面談した", note: "試作まで完成。学内で試験運用したいと相談あり",    movedOn: ago(11), settled: false },
+  { id: "s09", team: "みどり学院大 空き教室シェア",       stage: "伴走中",   note: "事務局と調整中。規程の壁を一緒に整理している",    movedOn: ago(6),  settled: false },
+  { id: "s10", team: "うみかぜ高専 ロボット教材の販売",   stage: "伴走中",   note: "小学校向けの教材キット。法人化の相談中",          movedOn: ago(2),  settled: false },
+  { id: "s11", team: "ひなた大 留学生向け生活支援",       stage: "連絡した", note: "代替わりで活動停止と判明。今回は見送り",          movedOn: ago(20), settled: true  },
+  { id: "s12", team: "あおば工科大 3Dプリンタ受託",       stage: "面談した", note: "受託の域を出ず、事業化の意思なし。見送り",        movedOn: ago(18), settled: true  },
+  { id: "s13", team: "くすのき大 防災アプリ開発",         stage: "面談した", note: "別の支援機関に決まったとのこと",                  movedOn: ago(15), settled: true  },
+  { id: "s14", team: "しらさぎ大 学内配達サービス",       stage: "伴走中",   note: "法人化まで完了。以降は定例のみ",                  movedOn: ago(13), settled: true  },
 ];
 
-/** 一覧をどう束ねるか。LAYOUT ごとに変わる */
-type Group = { key: string; label: string; mark?: "late" | "now"; items: Record[] };
+/** 一覧をどう束ねるか。進行中は段階ごとに束ねる */
+type Group = { key: string; label: string; items: Project[] };
 
-function grouped(list: Record[], filter: Filter): Group[] {
-  const head = filter === "open" ? TEXT.headOpen : filter === "done" ? TEXT.done : "すべて";
-
-  if (LAYOUT === "stage" && filter === "open") {
-    // 段階ごとに束ねる。CATEGORIES の順に並べ、中身が無い段階は出さない
+function grouped(list: Project[], filter: Filter): Group[] {
+  if (filter === "open") {
+    // CATEGORIES の順に並べ、中身が無い段階は出さない
     return CATEGORIES.map((c) => ({
       key: c,
       label: c,
-      mark: undefined,
-      items: list.filter((i) => i.category === c),
+      items: list.filter((i) => i.stage === c),
     })).filter((g) => g.items.length > 0);
   }
-
-  if (LAYOUT === "due" && filter === "open") {
-    const buckets: Group[] = [
-      { key: "late",  label: "期限が過ぎている", mark: "late", items: [] },
-      { key: "now",   label: "今日・明日",       mark: "now",  items: [] },
-      { key: "week",  label: "今週のうち",                     items: [] },
-      { key: "later", label: "それ以降",                       items: [] },
-    ];
-    list.forEach((i) => {
-      const d = diff(i.date);
-      if (d < 0) buckets[0].items.push(i);
-      else if (d <= 1) buckets[1].items.push(i);
-      else if (d <= 7) buckets[2].items.push(i);
-      else buckets[3].items.push(i);
-    });
-    return buckets.filter((b) => b.items.length > 0);
-  }
-
+  const head = filter === "done" ? TEXT.done : "すべて";
   return [{ key: "all", label: head, items: list }];
 }
 
-/** 行の右に出す小さなバッジ。LAYOUT ごとに意味が変わる */
-function rowBadge(r: Record): { text: string; kind: "warn" | "danger" } | null {
-  if (r.done) return null;
-  if (LAYOUT === "due") {
-    const d = diff(r.date);
-    if (d < 0) return { text: `${-d}日 超過`, kind: "danger" };
-    if (d === 0) return { text: "今日", kind: "warn" };
-    return null;
-  }
-  const w = waiting(r.date);
-  const limit = LAYOUT === "stage" ? 7 : 3;
-  return w >= limit ? { text: `${w}日`, kind: "warn" } : null;
+/** 行の右に出す小さなバッジ。放置日数を出す */
+function rowBadge(p: Project): { text: string; kind: "warn" | "danger" } | null {
+  if (p.settled) return null;
+  const w = waiting(p.movedOn);
+  return w >= STALE_DAYS ? { text: `${w}日 動きなし`, kind: "warn" } : null;
 }
 
 export default function Home() {
-  const [items, setItems] = useState<Record[]>([]);
-  const [appName, setAppName] = useState("お問い合わせ管理");
+  const [items, setItems] = useState<Project[]>([]);
+  const [appName, setAppName] = useState("学生プロジェクト台帳");
   const [loaded, setLoaded] = useState(false);
 
   const [view, setView] = useState<View>("list");
   const [filter, setFilter] = useState<Filter>("open");
   const [q, setQ] = useState("");
-  const [editing, setEditing] = useState<Record | null>(null);
+  const [editing, setEditing] = useState<Project | null>(null);
 
-  const [form, setForm] = useState({ name: "", category: CATEGORIES[0], note: "", date: today() });
+  const [form, setForm] = useState({ team: "", stage: CATEGORIES[0], note: "", movedOn: today() });
 
   useEffect(() => {
     try {
       const raw = localStorage.getItem(KEY);
-      setItems(raw ? (JSON.parse(raw) as Record[]) : SAMPLE);
+      setItems(raw ? (JSON.parse(raw) as Project[]) : SAMPLE);
       const n = localStorage.getItem(NAME_KEY);
       if (n) setAppName(n);
     } catch {
@@ -207,60 +153,59 @@ export default function Home() {
     localStorage.setItem(NAME_KEY, appName);
   }, [items, appName, loaded]);
 
-  // 見本データのまま触っていない状態か（1件でも足す・消すと false になる）
+  // 見本データのまま触っていない状態か（1団体でも足す・消すと false になる）
   const isSample = items.length === SAMPLE.length && items.every((i) => i.id.startsWith("s"));
 
   const counts = useMemo(
     () => ({
-      open: items.filter((i) => !i.done).length,
-      done: items.filter((i) => i.done).length,
+      open: items.filter((i) => !i.settled).length,
+      done: items.filter((i) => i.settled).length,
       all: items.length,
     }),
     [items]
   );
 
-  /** 2つ目の統計。LAYOUT で意味が変わる */
-  const attention = useMemo(() => {
-    const open = items.filter((i) => !i.done);
-    if (LAYOUT === "due") return open.filter((i) => diff(i.date) < 0).length;
-    const limit = LAYOUT === "stage" ? 7 : 3;
-    return open.filter((i) => waiting(i.date) >= limit).length;
-  }, [items]);
+  /** 動きが止まっている団体の数 */
+  const attention = useMemo(
+    () => items.filter((i) => !i.settled && waiting(i.movedOn) >= STALE_DAYS).length,
+    [items]
+  );
 
   const shown = useMemo(() => {
     const k = q.trim().toLowerCase();
     return items
-      .filter((i) => (filter === "all" ? true : filter === "open" ? !i.done : i.done))
-      .filter((i) => !k || (i.name + i.note + i.category).toLowerCase().includes(k))
-      .sort((a, b) => a.date.localeCompare(b.date));
+      .filter((i) => (filter === "all" ? true : filter === "open" ? !i.settled : i.settled))
+      .filter((i) => !k || (i.team + i.note + i.stage).toLowerCase().includes(k))
+      .sort((a, b) => a.movedOn.localeCompare(b.movedOn));
   }, [items, filter, q]);
 
   const groups = useMemo(() => grouped(shown, filter), [shown, filter]);
 
   function resetForm() {
-    setForm({ name: "", category: CATEGORIES[0], note: "", date: today() });
+    setForm({ team: "", stage: CATEGORIES[0], note: "", movedOn: today() });
     setEditing(null);
   }
 
   function save() {
-    const name = form.name.trim();
-    if (!name) return;
+    const team = form.team.trim();
+    if (!team) return;
     if (editing) {
-      setItems(items.map((i) => (i.id === editing.id ? { ...i, ...form, name } : i)));
+      setItems(items.map((i) => (i.id === editing.id ? { ...i, ...form, team } : i)));
     } else {
-      setItems([...items, { id: String(Date.now()), ...form, name, done: false }]);
+      setItems([...items, { id: String(Date.now()), ...form, team, settled: false }]);
     }
     resetForm();
     setView("list");
   }
 
-  function startEdit(r: Record) {
-    setEditing(r);
-    setForm({ name: r.name, category: r.category, note: r.note, date: r.date });
+  function startEdit(p: Project) {
+    setEditing(p);
+    setForm({ team: p.team, stage: p.stage, note: p.note, movedOn: p.movedOn });
     setView("new");
   }
 
-  const toggle = (id: string) => setItems(items.map((i) => (i.id === id ? { ...i, done: !i.done } : i)));
+  const toggle = (id: string) =>
+    setItems(items.map((i) => (i.id === id ? { ...i, settled: !i.settled } : i)));
   const remove = (id: string) => setItems(items.filter((i) => i.id !== id));
 
   const NAV: { k: View; label: string; count?: number }[] = [
@@ -297,7 +242,7 @@ export default function Home() {
             </button>
           ))}
         </div>
-        <div className="side-foot">/build で、あなたの題材に作り替わります</div>
+        <div className="side-foot">記録した団体 {counts.all} {UNIT}</div>
       </nav>
 
       {/* ───────── 本体 ───────── */}
@@ -332,7 +277,7 @@ export default function Home() {
               <div className="filters">
                 <div className="search">
                   <input className="field" value={q} onChange={(e) => setQ(e.target.value)}
-                    placeholder="名前・メモで検索" />
+                    placeholder="団体名・メモで検索" />
                 </div>
                 <div className="seg">
                   {(["open", "done", "all"] as Filter[]).map((f) => (
@@ -362,30 +307,27 @@ export default function Home() {
                 ) : (
                   groups.map((g) => (
                     <div key={g.key}>
-                      <div className={"group-head" + (g.mark ? ` is-${g.mark}` : "")}>
-                        {g.mark && <span className="dot" />}
+                      <div className="group-head">
                         {g.label}
                         <span className="count">{g.items.length} {UNIT}</span>
                       </div>
-                      {g.items.map((r) => {
-                        const b = rowBadge(r);
+                      {g.items.map((p) => {
+                        const b = rowBadge(p);
                         return (
-                          <div className="row" key={r.id}>
+                          <div className="row" key={p.id}>
                             <div className="row-main">
-                              <div className="row-title">{r.name}</div>
-                              {r.note && <div className="row-sub">{r.note}</div>}
+                              <div className="row-title">{p.team}</div>
+                              {p.note && <div className="row-sub">{p.note}</div>}
                             </div>
                             <div className="row-meta">
                               {b && <span className={`badge badge-${b.kind}`}>{b.text}</span>}
-                              {!(LAYOUT === "stage" && filter === "open") && (
-                                <span className="badge">{r.category}</span>
-                              )}
-                              <span className="row-time">{r.date.slice(5).replace("-", "/")}</span>
-                              <button className="btn-ghost" onClick={() => startEdit(r)}>編集</button>
-                              <button className="btn-ghost" onClick={() => toggle(r.id)}>
-                                {r.done ? TEXT.toBack : TEXT.toTo}
+                              {filter !== "open" && <span className="badge">{p.stage}</span>}
+                              <span className="row-time">{p.movedOn.slice(5).replace("-", "/")}</span>
+                              <button className="btn-ghost" onClick={() => startEdit(p)}>編集</button>
+                              <button className="btn-ghost" onClick={() => toggle(p.id)}>
+                                {p.settled ? TEXT.toBack : TEXT.toTo}
                               </button>
-                              <button className="btn-ghost danger-btn" onClick={() => remove(r.id)}>削除</button>
+                              <button className="btn-ghost danger-btn" onClick={() => remove(p.id)}>削除</button>
                             </div>
                           </div>
                         );
@@ -402,40 +344,43 @@ export default function Home() {
           {view === "new" && (
             <div className="panel">
               <div className="form-row">
-                <label className="label" htmlFor="f-name">名前<span className="req">必須</span></label>
-                <input id="f-name" className="field" value={form.name}
-                  onChange={(e) => setForm({ ...form, name: e.target.value })}
+                <label className="label" htmlFor="f-team">団体名<span className="req">必須</span></label>
+                <input id="f-team" className="field" value={form.team}
+                  onChange={(e) => setForm({ ...form, team: e.target.value })}
                   onKeyDown={(e) => { if (e.key === "Enter") save(); }}
-                  placeholder="例：Aさん（中2）" />
-                <span className="hint">あとで見て誰か分かる書き方にします</span>
+                  placeholder="例：みなと大 フードロス削減プロジェクト" />
+                <span className="hint">あとで見て、どの団体か分かる書き方にします</span>
               </div>
 
               <div className="form-row">
                 <div className="inline">
                   <div>
-                    <label className="label" htmlFor="f-cat">{TEXT.catLabel}</label>
-                    <select id="f-cat" className="select" value={form.category}
-                      onChange={(e) => setForm({ ...form, category: e.target.value })}>
+                    <label className="label" htmlFor="f-stage">{TEXT.catLabel}</label>
+                    <select id="f-stage" className="select" value={form.stage}
+                      onChange={(e) => setForm({ ...form, stage: e.target.value })}>
                       {CATEGORIES.map((c) => <option key={c}>{c}</option>)}
                     </select>
                   </div>
                   <div>
                     <label className="label" htmlFor="f-date">{TEXT.dateLabel}</label>
-                    <input id="f-date" className="field" type="date" value={form.date}
-                      onChange={(e) => setForm({ ...form, date: e.target.value })} />
+                    <input id="f-date" className="field" type="date" value={form.movedOn}
+                      onChange={(e) => setForm({ ...form, movedOn: e.target.value })} />
                   </div>
                 </div>
+                <span className="hint">
+                  段階を進めたら、{TEXT.dateLabel}も今日に更新すると、放置に気づけます
+                </span>
               </div>
 
               <div className="form-row">
                 <label className="label" htmlFor="f-note">メモ</label>
                 <textarea id="f-note" className="field" value={form.note}
                   onChange={(e) => setForm({ ...form, note: e.target.value })}
-                  placeholder="希望曜日・科目・折り返し時間など" />
+                  placeholder="何をしている団体か・代表・次の一手" />
               </div>
 
               <div className="form-actions">
-                <button className="btn" onClick={save} disabled={!form.name.trim()}>
+                <button className="btn" onClick={save} disabled={!form.team.trim()}>
                   {editing ? "保存する" : "一覧に追加"}
                 </button>
                 <button className="btn-ghost" onClick={() => { resetForm(); setView("list"); }}>やめる</button>
@@ -476,7 +421,7 @@ export default function Home() {
 
               <p className="note">
                 データはこの端末のブラウザにだけ保存されます。
-                別の端末や他の人とは共有されません（共有は第3回で扱います）。
+                別の端末や他の人とは共有されません。
               </p>
             </div>
           )}
